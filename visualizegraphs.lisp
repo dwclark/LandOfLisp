@@ -1,3 +1,7 @@
+;;TODO: This stuff is perfect for being made generic using CLOS
+;;Implement using CLOS, see if it results in less code, or more
+;;readable code, or perhaps both.
+
 (defparameter *max-label-length* 30)
 
 (defun dot-name (exp)
