@@ -1,10 +1,13 @@
-(load "visualizegraphs")
+(load "visualizegraphs.lisp")
 
 (defparameter *congestion-city-nodes* nil)
 (defparameter *congestion-city-edges* nil)
 (defparameter *player-pos* -1)
 (defparameter *visited-nodes* nil)
 (defparameter *node-num* 30)
+(defparameter *all-nodes*
+  (loop for i from 1 to *node-num*
+     collect i))
 (defparameter *edge-num* 45)
 (defparameter *worm-num* 3)
 (defparameter *cop-odds* 15)
@@ -16,15 +19,19 @@
   (unless (eql a b)
     (list (cons a b) (cons b a))))
 
+;;makes an alist of edges
 (defun make-edge-list ()
   (apply #'append (loop repeat *edge-num*
 		       collect (edge-pair (random-node) (random-node)))))
 
+;;finds all edges (as cons cells) that have node
+;;in the car
 (defun direct-edges (node edge-list)
   (remove-if-not (lambda (x)
 		   (eql (car x) node))
 		 edge-list))
 
+;;returns a list of nodes reachable from node
 (defun get-connected (node edge-list)
   (let ((visited nil))
     (labels ((traverse (node)
@@ -36,6 +43,10 @@
       (traverse node))
     visited))
 
+;;Possibly confusing aspect of this function is that it is not trying
+;;to find isolated nodes.  It is grouping together all nodes that are
+;;reachable from a given node and _that_ is an island.  Then try
+;;again with the leftovers.  Keep going until there are no leftovers.
 (defun find-islands (nodes edge-list)
   (let ((islands nil))
     (labels ((find-island (nodes)
@@ -47,23 +58,46 @@
       (find-island nodes))
     islands))
 
+;;Checks find-islands, ensures that each node is assigned
+;;to one and only one island. (not in book)
+(defun check-nodes-assigned-to-islands (islands)
+  (let ((island-nodes (sort (apply #'append islands) #'<)))
+    (if (not (equal island-nodes *all-nodes*))
+	(error "Some nodes are not assigned or are assigned multiple times")
+	t)))
+
+;;Makes an edge pair between the first island and the second
+;;island.  Repeats by cdr-ing down the list of islands so that
+;;each island has at least one connection to another island
 (defun connect-with-bridges (islands)
   (when (cdr islands)
     (append (edge-pair (caar islands) (caadr islands))
 	    (connect-with-bridges (cdr islands)))))
 
+;;Appends the bridges between the islands to the edge list
+;;that lists the bridges/roads on each island
 (defun connect-all-islands (nodes edge-list)
   (append (connect-with-bridges (find-islands nodes edge-list)) edge-list))
 
+;;Returns an odd alist.  A sample entry in the alist will be
+;;something like (1 (2) (4) (15)).  This is done so that extra
+;;information (like cop location) can be added to sublists
 (defun edges-to-alist (edge-list)
   (mapcar (lambda (node1)
 	    (cons node1
 		  (mapcar (lambda (edge)
 			    (list (cdr edge)))
+			  ;;returns list of conses (edge-pairs) with all
+			  ;;duplicates removed that are direct edges of node1
 			  (remove-duplicates (direct-edges node1 edge-list)
 					     :test #'equal))))
+	  ;;all this next line really does is get back the list of nodes.
+	  ;;i.e. a list of numbers from 1 -> *node-num* in this case
 	  (remove-duplicates (mapcar #'car edge-list))))
 
+;;filters edge-alist by adding cop locations
+;;to the sub lists of the original alist.  This is 
+;;done in a functional style, so a new alist is created
 (defun add-cops (edge-alist edges-with-cops)
   (mapcar (lambda (x)
 	    (let ((node1 (car x))
@@ -79,16 +113,21 @@
 			    node1-edges))))
 	  edge-alist))
 		  
-
+;;Makes city edges.  One possibly confusing point is
+;;that add-cops annotates the edge list and then returns
+;;the annotated edge-list, it creates no side effects
 (defun make-city-edges ()
   (let* ((nodes (loop for i from 1 to *node-num*
 		     collect i))
 	 (edge-list (connect-all-islands nodes (make-edge-list)))
+	 ;;create cop edges by filtering out a certain random number of edges
 	 (cops (remove-if-not (lambda (x)
 				(zerop (random *cop-odds*)))
 			      edge-list)))
     (add-cops (edges-to-alist edge-list) cops)))
 
+;;Gives numerical list of all direct neighbors to a given node.
+;;Note that all cop info is left out.
 (defun neighbors (node edge-alist)
   (mapcar #'car (cdr (assoc node edge-alist))))
 
@@ -101,6 +140,10 @@
 	      (within-one x b edge-alist))
 	    (neighbors a edge-alist))))
 
+;;Returns a list of lists.  Each sub list will have the
+;;node number as the initial element, then it will have the conditions
+;;at that node.  For example: (6 WUMPUS SIRENS!).  Empty
+;;nodes will just have the node number in the list
 (defun make-city-nodes (edge-alist)
   (let ((wumpus (random-node))
 	(glow-worms (loop for i below *worm-num*
@@ -117,6 +160,7 @@
 			 (when (some #'cdr (cdr (assoc n edge-alist)))
 			   '(sirens!))))))
 
+;;Find a node that has no associated information attached to it
 (defun find-empty-node ()
   (let ((x (random-node)))
     (if (cdr (assoc x *congestion-city-nodes*))
@@ -126,7 +170,11 @@
 (defun draw-city ()
   (ugraph->png "city" *congestion-city-nodes* *congestion-city-edges*))
 
+;;TODO: Start here
 (defun known-city-nodes ()
+  ;;if it's a visited node then either add a '*' (if it's where we are at
+  ;;now, or just return the node itself.  If we have not visited the
+  ;;node, append a '?'.
   (mapcar (lambda (node)
 	    (if (member node *visited-nodes*)
 		(let ((n (assoc node *congestion-city-nodes*)))
@@ -134,13 +182,25 @@
 		      (append n '(*))
 		      n))
 		(list node '?)))
+	  ;;returns a list of all nodes which is the visited nodes,
+	  ;;plus nodes that are connected to visited nodes.
 	  (remove-duplicates
 	   (append *visited-nodes*
+		   ;;mapcan appends any list returned from lambda onto
+		   ;;the list it will return
 		   (mapcan (lambda (node)
+			     ;;extracts the nodes visible from a given node
 			     (mapcar #'car 
 				     (cdr (assoc node *congestion-city-edges*))))
 			   *visited-nodes*)))))
 
+;;Map over each of the visited nodes.  For each of the visited nodes
+;;splice a new list consisting of the node number as first element
+;;and then each node reachable by that node as a single element list.
+;;a sample return value from known-city-edges might be:
+;;((29 (23) (28) (14) (15) (12)) (23 (29)))
+;;Here, 23 was the first visited node, and it only has an edge to 29.
+;;Then 29 was visited, which has edges to 23, 28, 14, 15, and 12
 (defun known-city-edges ()
   (mapcar (lambda (node)
 	    (cons node (mapcar (lambda (x)
@@ -167,12 +227,18 @@
 (defun charge (pos)
   (handle-direction pos t))
 
+;;used to figure out if we can go to the new position (it is one of the
+;;edges reachable from current location).  If we an go there, use handle-new-place
+;;to go there, otherwise display an error messagexs
 (defun handle-direction (pos charging)
   (let ((edge (assoc pos (cdr (assoc *player-pos* *congestion-city-edges*)))))
     (if edge
 	(handle-new-place edge pos charging)
 	(princ "That location does not exist"))))
 
+;;Basically all state management is localized to this function
+;;This function is what manages the game rules and calculates
+;;if you win or not.
 (defun handle-new-place (edge pos charging)
   (let* ((node (assoc pos *congestion-city-nodes*))
 	 (has-worm (and (member 'glow-worm node)
