@@ -1,6 +1,6 @@
 (defgeneric dead? (x))
 (defgeneric show (x))
-(defgeneric attack (first second))
+(defgeneric attack (attacker attacked))
 
 (defclass player ()
   ((health :initform 30 :accessor health)
