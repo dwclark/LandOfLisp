@@ -9,15 +9,30 @@
 	 (setf (initialized ,val) t)
 	 (setf (value ,val) (progn ,@body)))))
 
-(defclass game-tree ()
-  ((state :initarg :state :reader state)
-   (move :initform nil :initarg :move :reader move)
-   (ai-level :initform -1 :initarg :ai-level :reader ai-level)
-   (moves :initform (make-instance 'lazy-value))))
+(defclass game-move ()
+  ((source :initform nil :initarg :source :reader source)
+   (destination :initform nil :initarg :destination :reader destination)
+   (tree :initarg :tree :reader tree)))
 
-(defgeneric make-tree (parent &key move state))
-(defmethod make-tree ((parent game-tree) &key move state)
-  (make-instance (type-of parent) :move move :state state :ai-level (ai-level parent)))
+(defgeneric attacking? (move))
+(defmethod attacking? ((move game-move))
+  (not (null (source move))))
+
+(defclass game-tree ()
+  ((board :initform nil :initarg :board :reader board)
+   (current-player :initform nil :initarg :current-player :reader current-player)
+   (spare-dice :initform nil :initarg :spare-dice :reader spare-dice)
+   (first-move :initform nil :initarg :first-move :reader first-move)
+   (moves :initform (make-instance 'lazy-value))
+   (score-func :initform #'score-by-winner :initarg :score-func :reader score-func)
+   (ai-level :initform -1 :initarg :ai-level :reader ai-level)))
+
+(defgeneric make-tree (parent the-board the-player the-spare-dice the-first-move))
+(defmethod make-tree ((parent game-tree) the-board the-player the-spare-dice the-first-move)
+  (make-instance (type-of parent) 
+		 :board the-board :current-player the-player
+		 :spare-dice the-spare-dice :first-move the-first-move
+		 :ai-level (ai-level parent) :score-func (score-func parent)))
 
 (defmethod print-object ((the-tree game-tree) stream)
   (print-unreadable-object (the-tree stream :type t)
@@ -25,33 +40,6 @@
 	    (ary (board the-tree)) (current-player the-tree) 
 	    (spare-dice the-tree) (first-move the-tree))))
 
-(defgeneric source (tree))
-(defmethod source ((tree game-tree))
-  (first (move tree)))
-
-(defgeneric destination (tree))
-(defmethod destination ((tree game-tree))
-  (second (move tree)))
-
-(defun package-state (the-board the-player the-spare-dice the-first-move)
-  (vector the-board the-player the-spare-dice the-first-move))
-
-(defgeneric board (tree))
-(defmethod board ((tree game-tree))
-  (aref (state tree) 0))
-
-(defgeneric current-player (tree))
-(defmethod current-player ((tree game-tree))
-  (aref (state tree) 1))
-
-(defgeneric spare-dice (tree))
-(defmethod spare-dice ((tree game-tree))
-  (aref (state tree) 2))
-
-(defgeneric first-move (tree))
-(defmethod first-move ((tree game-tree))
-  (aref (state tree) 3))
-  
 (defgeneric moves (tree))
 (defmethod moves ((tree game-tree))
   (with-slots (moves) tree
@@ -65,51 +53,63 @@
 			 do (let ((dst-cell (aref (ary board) dst-idx)))
 			      (if (and (not (eq (player dst-cell) current-player))
 				       (> (dice src-cell) (dice dst-cell)))
-				  (push (make-tree tree 
-						   :move (list src-idx dst-idx)
-						   :state (package-state (attack board src-idx dst-idx)
-									 current-player
-									 (+ (spare-dice tree) (dice dst-cell))
-									 nil))
-					ret-list))))))))
+				  (push
+				   (make-instance 'game-move :source src-idx :destination dst-idx
+						  :tree (make-tree tree (attack board src-idx dst-idx)
+								   current-player (+ (spare-dice tree) (dice dst-cell)) nil))
+				   ret-list))))))))
 	(if (not (first-move tree))
-	    (push (make-tree tree 
-			     :state (package-state (add-new-dice (board tree) (current-player tree) (1- (spare-dice tree)))
-						   (mod (1+ (current-player tree)) (num-players (board tree)))
-						   0 t))
-		  ret-list))
+	    (push
+	     (make-instance 'game-move :tree (make-tree tree (add-new-dice (board tree) (current-player tree) (1- (spare-dice tree)))
+							(mod (1+ (current-player tree)) (num-players (board tree))) 0 t))
+	     ret-list))
 	ret-list))))
 
-(defgeneric passing? (tree))
-(defmethod passing? ((tree game-tree))
-  (null (move tree)))
+(defun score-by-winner (board player)
+  (let ((w (winners board)))
+    (if (member player w)
+	(/ 1 (length w))
+	0)))
 
-(defgeneric attacking? (tree))
-(defmethod attacking? ((tree game-tree))
-  (not (null (move tree))))
+(defun score-by-threat (board player)
+  (loop for hex across (ary board)
+       for pos from 0
+       sum (if (eq (player hex) player)
+	       (if (threatened pos board)
+		   1
+		   2)
+	       -1)))
 
-(defgeneric rate-position (tree player search-depth))
-(defmethod rate-position ((tree game-tree) player search-depth)
+(defun threatened (pos board)
+  (with-accessors ((ary ary)) board
+    (let ((cell (aref ary pos)))
+      (loop for n in (neighbors board pos)
+	 do (let ((ncell (aref ary n)))
+	      (when (and (not (eq (player cell) (player ncell)))
+			 (> (dice ncell) (dice cell)))
+		(return t)))))))
+
+(defgeneric rate-position (tree player &key search-depth))
+(defmethod rate-position ((tree game-tree) player &key search-depth)
   (if (and (can-move? tree) (not (zerop search-depth)))
       (apply (if (eq (current-player tree) player)
 		 #'max
 		 #'min)
-	     (get-ratings tree player search-depth))
-      (let ((w (winners (board tree))))
-	(if (member player w)
-	    (/ 1 (length w))
-	    0))))
+	     (get-ratings tree player :search-depth search-depth))
+      (funcall (score-func tree) (board tree) player)))
 
-(defgeneric get-ratings (tree player search-depth))
-(defmethod get-ratings ((tree game-tree) player search-depth)
+(defgeneric get-ratings (tree player &key search-depth))
+(defmethod get-ratings ((tree game-tree) player &key search-depth)
   (mapcar (lambda (move)
-	    (rate-position move player (1- search-depth)))
+	    (rate-position (tree move) player :search-depth (1- search-depth)))
 	  (moves tree)))
 
 (defun test-moves ()
   (let* ((the-board (make-instance 'board-2 :ary #((1 1) (1 2) (1 1) (0 3))))
-	 (the-game (make-instance 'game-tree :state (package-state the-board 0 0 t)))
-	 (the-game-2 (make-instance 'game-tree :state (package-state the-board 0 0 nil))))
+	 (the-game (make-instance 'game-tree :board the-board 
+				  :current-player 0 :spare-dice 0 :first-move t))
+	 (the-game-2 (make-instance 'game-tree :board the-board 
+				    :current-player 0 :spare-dice 0 :first-move nil)))
     (assert (= 3 (length (moves the-game))))
     (assert (= 4 (length (moves the-game-2))))))
 
@@ -126,8 +126,8 @@
 
 (defgeneric handle-computer (tree))
 (defmethod handle-computer ((tree game-tree))
-  (let ((ratings (get-ratings tree (current-player tree) (ai-level tree))))
-    (nth (position (apply #'max ratings) ratings) (moves tree))))
+  (let ((ratings (get-ratings tree (current-player tree) :search-depth (ai-level tree))))
+    (tree (nth (position (apply #'max ratings) ratings) (moves tree)))))
 
 (defgeneric play-vs-computer (tree))
 (defmethod play-vs-computer ((tree game-tree))
@@ -154,7 +154,7 @@
   (fresh-line)
   
   (let ((selection (read)))
-    (nth (1- selection) (moves tree))))
+    (tree (nth (1- selection) (moves tree)))))
 
 (defclass memoizing-game-tree (game-tree)
   ((tree-memoizer :initform nil :reader tree-memoizer)
@@ -165,52 +165,50 @@
       (progn
 	(setf (slot-value tree 'tree-memoizer) (make-hash-table :test #'equalp))
 	(setf (slot-value tree 'rate-position-memoizer) (make-hash-table :test #'equalp)))))
-      
-(defmethod make-tree ((parent memoizing-game-tree) &key move state)
-  (let ((new-tree (call-next-method parent :move move :state state)))
-    (setf (slot-value new-tree 'tree-memoizer) (tree-memoizer parent))
-    (setf (slot-value new-tree 'rate-position-memoizer) (rate-position-memoizer parent))
-    new-tree))
 
 (defmacro memoized (cache state &body body)
-  (let ((tmp-state (gensym)))
+  (let ((tmp-state (gensym))
+	(contents (gensym))
+	(is-there? (gensym)))
     `(let ((,tmp-state ,state))
-       (or (gethash ,tmp-state ,cache)
-	   (setf (gethash ,tmp-state ,cache) (progn ,@body))))))
+       (multiple-value-bind (,contents ,is-there?) (gethash ,tmp-state ,cache)
+	 (if ,is-there?
+	     ,contents
+	     (setf (gethash ,tmp-state ,cache) (progn ,@body)))))))
 
-(defmethod moves ((tree memoizing-game-tree))
-  (with-accessors ((cache tree-memoizer)) tree
-    (memoized cache (state tree) (call-next-method))))
+(defmethod make-tree ((parent memoizing-game-tree) the-board the-player the-spare-dice the-first-move)
+  (memoized (tree-memoizer parent) (list (ary the-board) the-player the-spare-dice the-first-move)
+    (let ((new-tree (call-next-method)))
+      (setf (slot-value new-tree 'tree-memoizer) (tree-memoizer parent))
+      (setf (slot-value new-tree 'rate-position-memoizer) (rate-position-memoizer parent))
+      new-tree)))
 
-(defmethod rate-position ((tree memoizing-game-tree) player search-depth)
-  (with-accessors ((cache rate-position-memoizer)) tree
-    (memoized cache (cons player (state tree)) (call-next-method))))
-	   
+(defmethod rate-position ((tree memoizing-game-tree) player &key search-depth)
+  (let ((player-cache (memoized (rate-position-memoizer tree) player (make-hash-table))))
+    (memoized player-cache tree (call-next-method))))
+
+(defun dump-cache (the-cache)
+  (loop for k being the hash-keys in the-cache using (hash-value v)
+       do (format t "~&~a ~a" k v)))
+
 (defclass board ()
-  ((info :initarg :info)
+  ((num-players :initarg :num-players :reader num-players)
+   (max-dice :initarg :max-dice :reader max-dice)
+   (side-length :initarg :side-length :reader side-length)
+   (hexnum :reader hexnum)
    (ary :initarg :ary :initform nil :reader ary)))
 
-(defun package-info (num-players max-dice side-length)
-  (vector num-players max-dice side-length))
-
-(defgeneric num-players (the-board))
-(defmethod num-players ((the-board board))
-  (with-slots (info) the-board
-    (aref info 0)))
-
-(defgeneric max-dice (the-board))
-(defmethod max-dice ((the-board board))
-  (with-slots (info) the-board
-    (aref info 1)))
-
-(defgeneric side-length (the-board))
-(defmethod side-length ((the-board board))
-  (with-slots (info) the-board
-    (aref info 2)))
-
-(defgeneric hexnum (the-board))
-(defmethod hexnum ((the-board board))
-  (* (side-length the-board) (side-length the-board)))
+(defmethod initialize-instance :after ((b board) &key)
+  (setf (slot-value b 'hexnum) (* (side-length b) (side-length b)))
+  (if (null (ary b))
+      (with-accessors ((players num-players) (dice max-dice) (hexnum hexnum)) b
+	(setf (slot-value b 'ary) 
+	      (loop with the-ary = (make-array (list hexnum)) 
+		 for i from 0 below hexnum
+		 do (progn
+		      (setf (aref the-ary i) 
+			    (list (random players) (1+ (random dice)))))
+		 finally (return the-ary))))))
 
 (defgeneric winners (the-board))
 (defmethod winners ((the-board board))
@@ -243,25 +241,24 @@
 	(format t "The winner is ~a" (letter (first w))))))
 
 (defclass board-2 (board)
-  ((info :initform (package-info 2 3 2))))
+  ((num-players :initform 2)
+   (max-dice :initform 3)
+   (side-length :initform 2)))
 
-(defclass board-3 (board)
-  ((info :initform (package-info 2 3 3))))
+(defclass board-3 (board-2)
+  ((num-players :initform 2)
+   (max-dice :initform 3)
+   (side-length :initform 3)))
 
 (defclass board-4 (board)
-  ((info :initform (package-info 2 3 4))))
+  ((num-players :initform 2)
+   (max-dice :initform 3)
+   (side-length :initform 4)))
 
-(defmethod initialize-instance :after ((b board) &key)
-  (if (null (ary b))
-      (with-accessors ((num-players num-players) (max-dice max-dice)) b
-	(let ((hexnum (hexnum b)))
-	  (setf (slot-value b 'ary) 
-		(loop with the-ary = (make-array (list hexnum)) 
-		   for i from 0 below hexnum
-		   do (progn
-			(setf (aref the-ary i) 
-			      (list (random num-players) (1+ (random max-dice)))))
-		   finally (return the-ary)))))))
+(defclass board-5 (board)
+  ((num-players :initform 2)
+   (max-dice :initform 3)
+   (side-length :initform 5)))
 
 (defmethod print-object ((the-board board) stream)
   (print-unreadable-object (the-board stream :type t)
@@ -276,16 +273,18 @@
 (defmethod pos ((b board) x y)
   (aref (ary b) (index b x y)))
     
-(defgeneric clone (the-board))
-(defmethod clone ((the-board board))
-  (make-instance (type-of the-board)
-		 :info (slot-value the-board 'info)
-		 :ary (map 'vector #'copy-list (ary the-board))))
+(defgeneric clone (b))
+(defmethod clone ((b board))
+  (make-instance (type-of b)
+		 :num-players (num-players b) :max-dice (max-dice b)
+		 :side-length (side-length b) :ary (map 'vector #'copy-list (ary b))))
 
 (defgeneric same (first second))
-(defmethod same ((first board) (second board))
-  (and (eq (type-of first) (type-of second))
-       (equalp (ary first) (ary second))))
+(defmethod same ((b1 board) (b2 board))
+  (and (= (num-players b1) (num-players b2))
+       (= (max-dice b1) (max-dice b2))
+       (= (side-length b1) (side-length b2))
+       (equalp (ary b1) (ary b2))))
 
 (defun player (cell)
   (first cell))
@@ -329,7 +328,7 @@
 
 (defun test-neighbors ()
   (let ((b1 (make-instance 'board-2))
-	(b2 (make-instance 'board :info (package-info 2 3 3))))
+	(b2 (make-instance 'board-3)))
     (assert (equalp (list 0 3) (sort (neighbors b1 2) #'<)))
     (assert (equalp (list 1 2 3) (sort (neighbors b1 0) #'<)))
     (assert (equalp (list 0 1 3 5 7 8) (sort (neighbors b2 4) #'<)))))
@@ -376,3 +375,55 @@
   (test-winners)
   (test-neighbors)
   (test-moves))
+
+(defclass ab-game-tree (memoizing-game-tree) ())
+
+(defgeneric ratings-max (tree player upper lower search-depth))
+(defmethod ratings-max ((tree ab-game-tree) player upper lower search-depth)
+  (labels ((f (moves lower)
+	     (unless (null moves)
+	       (let ((x (rate-position (tree (first moves))
+				       player :upper upper :lower lower
+				       :search-depth (1- search-depth))))
+		 (if (>= x upper)
+		     (list x)
+		     (cons x (f (cdr moves) (max x lower))))))))
+    (f (moves tree) lower)))
+
+(defgeneric ratings-min (tree player upper lower search-depth))
+(defmethod ratings-min ((tree ab-game-tree) player upper lower search-depth)
+  (labels ((f (moves upper)
+	     (unless (null moves)
+	       (let ((x (rate-position (tree (first moves))
+				       player :upper upper :lower lower
+				       :search-depth (1- search-depth))))
+		 (if (<= x lower)
+		     (list x)
+		     (cons x (f (cdr moves) (min x upper))))))))
+    (f (moves tree) upper)))
+
+(defmethod rate-position ((tree ab-game-tree) player &key upper lower search-depth)
+  (if (and (can-move? tree) (not (zerop search-depth)))
+      (if (eq (current-player tree) player)
+	  (apply #'max (ratings-max tree player upper lower search-depth))
+	  (apply #'min (ratings-min tree player upper lower search-depth)))
+      (funcall (score-func tree) (board tree) player)))
+
+(defmethod handle-computer ((tree ab-game-tree))
+  (let ((ratings (ratings-max tree (current-player tree) 
+			      most-positive-fixnum most-negative-fixnum 
+			      (ai-level tree))))
+    (tree (nth (position (apply #'max ratings) ratings) (moves tree)))))
+
+			 
+
+;3 player
+;(play-vs-computer (make-instance 'memoizing-game-tree :init-caches t :board (make-instance 'board-3) :current-player 0 :spare-dice 0 :first-move t))
+;2 player
+;(play-vs-computer (make-instance 'game-tree :board (make-instance 'board-2) :current-player 0 :spare-dice 0 :first-move t))
+;4 player
+;(play-vs-computer (make-instance 'memoizing-game-tree :ai-level 4 :init-caches t :board (make-instance 'board-4) :current-player 0 :spare-dice 0 :first-move t))
+;4 player, better scoring
+;(play-vs-computer (make-instance 'memoizing-game-tree :ai-level 4 :score-func #'score-by-threat :init-caches t :board (make-instance 'board-4) :current-player 0 :spare-dice 0 :first-move t))
+;5 player, with ab pruning
+;(play-vs-computer (make-instance 'ab-game-tree :ai-level 4 :score-func #'score-by-threat :init-caches t :board (make-instance 'board-5) :current-player 0 :spare-dice 0 :first-move t))
