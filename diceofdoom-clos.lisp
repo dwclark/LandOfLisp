@@ -1,3 +1,6 @@
+(load "webserver.lisp")
+(load "xmlmacros.lisp")
+
 (defclass lazy-value ()
   ((initialized :initform nil :accessor initialized)
    (value :initform nil :accessor value)))
@@ -415,7 +418,82 @@
 			      (ai-level tree))))
     (tree (nth (position (apply #'max ratings) ratings) (moves tree)))))
 
-			 
+(defclass web-board-config ()
+  ((width :initform 900 :initarg :width :reader width)
+   (height :initform 500 :initarg :height :reader height)
+   (board-scale :initform 64 :initarg :board-scale :reader board-scale)
+   (top-offset :initform 3 :initarg :top-offset :reader top-offset)
+   (dice-scale :initform 40 :initarg :dice-scale :reader dice-scale)
+   (dot-size :initform 0.05 :initarg :dot-size :reader dot-size)
+   (die-colors :initform '((255 63 63) (63 63 255)) :initarg :die-colors :reader die-colors)))
+
+(defun draw-die-svg (config x y col)
+  (with-accessors ((dice-scale dice-scale) (dot-size dot-size)) config
+    (labels ((scale-points (lst x y factor)
+	       (loop for i from 1
+		    for item in lst
+		    collect (+ (if (oddp i) x y) (* factor item)))))
+      (polygon (scale-points '(0 -1 -0.6 -0.75 0 -0.5 0.6 -0.75) x y dice-scale) (brightness col 40))
+      (polygon (scale-points '(0 -0.5 -0.6 -0.75 -0.6 0 0 0.25) x y dice-scale) col)
+      (polygon (scale-points '(0 -0.5 0.6 -0.75 0.6 0 0 0.25) x y dice-scale) (brightness col -40))
+      (mapc (lambda (x1 y1)
+	      (polygon (scale-points (scale-points '(-1 -1 -1 1 1 1 1 -1) x1 y1 dot-size)
+				     x y dice-scale) '(255 255 255)))
+	    '(-0.05 0.125 0.3 -0.3 -0.125 0.05 0.2 0.2 0.45 0.45 -0.45 -0.2)
+	    '(-0.875 -0.80 -0.725 -0.775 -0.70 -0.625
+	      -0.35 -0.05 -0.45 -0.15 -0.45 -0.05)))))
+
+(defun draw-tile-svg (config x y pos hex xx yy col chosen-tile)
+  (with-accessors ((board-scale board-scale) (dice-scale dice-scale)) config
+    (labels ((scale-points (lst z)
+	       (loop for i from 1
+		  for item in lst
+		  collect (if (oddp i)
+			      (+ xx (* board-scale item))
+			      (+ yy (* board-scale (+ item (* (- 1 z) 0.1))))))))
+      (loop for z below 2
+	 do (polygon (scale-points '(-1 -0.2 0 -0.5 1 -0.2 1 0.2 0 0.5 -1  0.2) z)
+		     (if (eql pos chosen-tile)
+			 (brightness col 100)
+			 col)))
+      (loop for z below (second hex)
+	 do (draw-die-svg config (+ xx
+				    (* dice-scale 
+				       0.3
+				       (if (oddp (+ x y z))
+					   -0.3
+					   0.3)))
+			  (- yy (* dice-scale z 0.8)) col)))))
+
+(defun draw-board-svg (config board chosen-tile legal-tiles)
+  (with-accessors ((board-scale board-scale) (die-colors die-colors)
+		   (top-offset top-offset)) config
+    (with-accessors ((side-length side-length)) board
+    (loop for y below side-length
+       do (loop for x below side-length
+	     for pos = (+ x (* side-length y))
+	     for hex = (aref (ary board) pos)
+	     for xx = (* board-scale (+ (* 2 x) (- side-length y)))
+	     for yy = (* board-scale (+ (* y 0.7) top-offset))
+	     for col = (brightness (nth (first hex) die-colors)
+				   (* -15 (- side-length y)))
+	     do (if (member pos legal-tiles)
+		    (tag g ()
+		      (tag a ("xlink:href" (make-game-link pos))
+			(draw-tile-svg config x y pos hex xx yy col chosen-tile)))
+		    (draw-tile-svg config x y pos hex xx yy col chosen-tile)))))))
+
+(defun make-game-link (pos)
+  (format nil "/game.html?chosen=~a" pos))
+  
+
+(defun board-to-file (fname)
+  (with-open-file (*standard-output*
+		   fname
+		   :direction :output
+		   :if-exists :supersede)
+    (let ((wbc (make-instance 'web-board-config)))
+      (svg (width wbc) (height wbc) (draw-board-svg wbc (make-instance 'board-5) nil nil)))))
 
 ;3 player
 ;(play-vs-computer (make-instance 'memoizing-game-tree :init-caches t :board (make-instance 'board-3) :current-player 0 :spare-dice 0 :first-move t))
